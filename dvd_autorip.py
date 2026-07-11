@@ -32,9 +32,7 @@ try:
     MIN_LENGTH = config.get("SETTINGS", "min_length")
     HANDBRAKE_PRESET = config.get("SETTINGS", "handbrake_preset")
     
-    # Laufwerke aus der Liste parsen (entfernt Leerzeichen)
     DRIVES = [d.strip().upper() for d in config.get("SETTINGS", "drives").split(",")]
-
     DISCORD_WEBHOOK_URL = config.get("DISCORD", "webhook_url")
 except Exception as e:
     print(f"\033[91m[FEHLER] Fehler beim Lesen der 'config.ini': {e}\033[0m")
@@ -52,13 +50,24 @@ RESET = "\033[0m"
 print_lock = threading.Lock()
 handbrake_queues = {drive: queue.Queue() for drive in DRIVES}
 
+# Dynamische Positionszuweisung für TQDM-Balken (2 Zeilen pro Laufwerk)
+# Laufwerk 1 bekommt Position 0 & 1, Laufwerk 2 bekommt Position 2 & 3, usw.
+PBAR_POSITIONS = {}
+for idx, drive in enumerate(DRIVES):
+    PBAR_POSITIONS[drive] = {
+        "makemkv": idx * 2,
+        "handbrake": idx * 2 + 1
+    }
+
 def log(drive, message, color=RESET):
-    with print_lock:
-        print(f"{color}[Laufwerk {drive}:] {message}{RESET}")
+    """Nutzt tqdm.write, damit Log-Texte die Fortschrittsbalken nicht zerschneiden."""
+    clean_drive = drive.replace(":", "")
+    tqdm.write(f"{color}[Laufwerk {clean_drive}:] {message}{RESET}")
 
 def send_discord_notification(disc_name, drive, event_type, error_msg=""):
     if not DISCORD_WEBHOOK_URL or "HIER_DEINE_WEBHOOK" in DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL == '""':
         return
+    clean_drive = drive.replace(":", "")
     if event_type == "eject":
         title = "💿 DVD eingelesen & Ausgeworfen!"
         color = 3447003
@@ -76,7 +85,7 @@ def send_discord_notification(disc_name, drive, event_type, error_msg=""):
         "embeds": [{
             "title": title, "description": description, "color": color,
             "fields": [
-                {"name": "Laufwerk", "value": f"Laufwerk {drive}", "inline": True},
+                {"name": "Laufwerk", "value": f"Laufwerk {clean_drive}:", "inline": True},
                 {"name": "Zielordner", "value": f"`{OUTPUT_BASE}\\{disc_name}`", "inline": False}
             ],
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -106,7 +115,6 @@ def get_dvd_name(drive_letter):
     volume_name_buffer = ctypes.create_unicode_buffer(1024)
     file_system_name_buffer = ctypes.create_unicode_buffer(1024)
     
-    # drive_letter enthält bereits das "D:" oder "E:"
     success = kernel32.GetVolumeInformationW(
         ctypes.c_wchar_p(drive_letter + "\\"), volume_name_buffer, ctypes.sizeof(volume_name_buffer),
         None, None, None, file_system_name_buffer, ctypes.sizeof(file_system_name_buffer)
@@ -133,7 +141,6 @@ def get_folder_size(folder_path):
 
 def eject_drive(drive_letter):
     try:
-        # MCI Befehle mögen keine Doppelpunkte im Alias, daher säubern wir den Alias-Namen
         clean_alias = drive_letter.replace(":", "")
         ctypes.windll.winmm.mciSendStringW(f"open {drive_letter} type cdaudio alias drive{clean_alias}", None, 0, 0)
         ctypes.windll.winmm.mciSendStringW(f"set drive{clean_alias} door open", None, 0, 0)
@@ -146,8 +153,17 @@ def run_makemkv_with_byte_progress(drive_letter, cmd, temp_folder):
     if total_dvd_size == 0: total_dvd_size = 8500000000
     total_mb = int(total_dvd_size / (1024 * 1024))
     
-    with print_lock:
-        pbar = tqdm(total=total_mb, desc=f"{CYAN}[Laufwerk {drive_letter}] MakeMKV liest DVD aus{RESET}", unit="MB", bar_format="{desc}: |{bar}| {percentage:3.0f}% [{n_fmt}/{total_fmt} MB, {elapsed}<{remaining}]", leave=True)
+    clean_drive = drive_letter.replace(":", "")
+    pbar_pos = PBAR_POSITIONS[drive_letter]["makemkv"]
+    
+    pbar = tqdm(
+        total=total_mb, 
+        desc=f"{CYAN}[Laufwerk {clean_drive}] MakeMKV liest aus{RESET}", 
+        unit="MB", 
+        bar_format="{desc}: |{bar}| {percentage:3.0f}% [{n_fmt}/{total_fmt} MB, {elapsed}<{remaining}]", 
+        leave=False, # Verschwindet nach Abschluss, um Platz zu sparen
+        position=pbar_pos
+    )
 
     def swallow_output():
         for _ in iter(process.stdout.readline, ""): pass
@@ -157,21 +173,30 @@ def run_makemkv_with_byte_progress(drive_letter, cmd, temp_folder):
         time.sleep(1)
         current_bytes = get_folder_size(temp_folder)
         current_mb = int(current_bytes / (1024 * 1024))
-        with print_lock:
-            if current_mb > pbar.n:
-                if current_mb >= total_mb: pbar.n = total_mb - 1
-                else: pbar.n = current_mb
-                pbar.refresh()
+        if current_mb > pbar.n:
+            if current_mb >= total_mb: pbar.n = total_mb - 1
+            else: pbar.n = current_mb
+            pbar.refresh()
                 
     process.wait()
-    with print_lock: pbar.n = pbar.total; pbar.refresh(); pbar.close(); print("")
+    pbar.n = pbar.total
+    pbar.refresh()
+    pbar.close()
     if process.returncode != 0: raise subprocess.CalledProcessError(process.returncode, cmd)
 
 def run_handbrake_with_progress(drive_letter, cmd, description):
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="ignore", bufsize=0)
     
-    with print_lock:
-        pbar = tqdm(total=100, desc=f"{YELLOW}[Laufwerk {drive_letter}: HB-Queue] {description}{RESET}", bar_format="{desc}: |{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]", leave=True)
+    clean_drive = drive_letter.replace(":", "")
+    pbar_pos = PBAR_POSITIONS[drive_letter]["handbrake"]
+    
+    pbar = tqdm(
+        total=100, 
+        desc=f"{YELLOW}[Laufwerk {clean_drive}: HB] {description}{RESET}", 
+        bar_format="{desc}: |{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]", 
+        leave=False,
+        position=pbar_pos
+    )
 
     last_val = 0
     full_output_log = []
@@ -185,17 +210,21 @@ def run_handbrake_with_progress(drive_letter, cmd, description):
             try:
                 pct = int(float(matches[-1].replace(",", ".")))
                 if pct > last_val and pct <= 100:
-                    with print_lock: pbar.n = pct; pbar.refresh()
+                    pbar.n = pct
+                    pbar.refresh()
                     last_val = pct
             except ValueError: pass
 
     process.wait()
-    with print_lock: pbar.n = 100; pbar.refresh(); pbar.close(); print("")
+    pbar.n = 100
+    pbar.refresh()
+    pbar.close()
+    
     if process.returncode != 0:
         with print_lock:
-            print(f"{RED}[Laufwerk {drive_letter}: !!! HANDBRAKE FEHLERLOG !!!]{RESET}")
+            tqdm.write(f"{RED}[Laufwerk {clean_drive}: !!! HANDBRAKE FEHLERLOG !!!]{RESET}")
             log_text = "".join(full_output_log)
-            for log_line in log_text.splitlines()[-12:]: print(f"  -> {log_line}")
+            for log_line in log_text.splitlines()[-12:]: tqdm.write(f"  -> {log_line}")
         raise subprocess.CalledProcessError(process.returncode, cmd)
 
 def handbrake_worker(drive_letter):
@@ -277,12 +306,17 @@ def drive_worker(drive_letter):
 def main():
     os.system('') # Aktiviert ANSI-Farben unter Windows
     print("==============================================")
-    print("   Asynchroner DVD-Ripper mit Config (v6.1)   ")
+    print("   Asynchroner DVD-Ripper mit Config (v6.2)   ")
     print("==============================================")
     
     register_makemkv()
     print(f"\nUeberwache {', '.join(DRIVES)} parallel...")
     print("Einstellungen erfolgreich aus 'config.ini' geladen.\n")
+    print("--- Konsolen-Live-Status ---")
+    
+    # Reserviert Zeilen im Terminal, damit tqdm die festen Positionen nutzen kann
+    for _ in range(len(DRIVES) * 2):
+        print("")
 
     # Threads starten
     for drive in DRIVES:
