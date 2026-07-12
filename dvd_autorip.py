@@ -106,6 +106,24 @@ def register_makemkv():
 
 def get_mkv_drive_index(drive_letter):
     try:
+        # Führt MakeMKV im Info-Modus aus, um die echten Indizes zu listen
+        cmd = [MAKE_MKV_PATH, "-r", "info", "disc:999"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="ignore")
+        
+        # Sucht nach Zeilen wie: CSTR:layer_drive_letter,"D:"
+        # Und extrahiert die dazugehörige Drive-ID
+        drive_blocks = res.stdout.split("DRV:")
+        for block in drive_blocks:
+            if f'"{drive_letter.upper()}"' in block or f'"{drive_letter.upper()}\\"' in block:
+                # Erste Zahl im Block extrahieren (das ist der Index)
+                match = re.search(r"^(\d+),", block)
+                if match:
+                    return match.group(1)
+    except Exception as e:
+        print(f"[!] Fehler bei automatischer Index-Suche: {e}")
+    
+    # Fallback auf deine alte Methode, falls MakeMKV nicht antwortet
+    try:
         return str(DRIVES.index(drive_letter))
     except:
         return "0"
@@ -142,10 +160,14 @@ def get_folder_size(folder_path):
 def eject_drive(drive_letter):
     try:
         clean_alias = drive_letter.replace(":", "")
-        ctypes.windll.winmm.mciSendStringW(f"open {drive_letter} type cdaudio alias drive{clean_alias}", None, 0, 0)
+        # WICHTIG: Windows braucht zwingend den Backslash (z.B. "D:\"), um die Laufwerke sauber zu trennen
+        drive_path = drive_letter if drive_letter.endswith("\\") else f"{drive_letter}\\"
+        
+        ctypes.windll.winmm.mciSendStringW(f"open {drive_path} type cdaudio alias drive{clean_alias}", None, 0, 0)
         ctypes.windll.winmm.mciSendStringW(f"set drive{clean_alias} door open", None, 0, 0)
         ctypes.windll.winmm.mciSendStringW(f"close drive{clean_alias}", None, 0, 0)
-    except Exception as e: log(drive_letter, f"Fehler beim Auswerfen: {e}", RED)
+    except Exception as e: 
+        log(drive_letter, f"Fehler beim Auswerfen: {e}", RED)
 
 def run_makemkv_with_byte_progress(drive_letter, cmd, temp_folder):
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="ignore")
