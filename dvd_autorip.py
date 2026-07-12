@@ -32,9 +32,6 @@ try:
     MIN_LENGTH = config.get("SETTINGS", "min_length")
     HANDBRAKE_PRESET = config.get("SETTINGS", "handbrake_preset")
     
-    # HIER NEU: GPU Encoder aus Config laden (Standard: x264 falls nicht gesetzt)
-    HANDBRAKE_ENCODER = config.get("SETTINGS", "handbrake_encoder", fallback="x264")
-    
     DRIVES = [d.strip().upper() for d in config.get("SETTINGS", "drives").split(",")]
     DISCORD_WEBHOOK_URL = config.get("DISCORD", "webhook_url")
 except Exception as e:
@@ -53,6 +50,8 @@ RESET = "\033[0m"
 print_lock = threading.Lock()
 handbrake_queues = {drive: queue.Queue() for drive in DRIVES}
 
+# Dynamische Positionszuweisung für TQDM-Balken (2 Zeilen pro Laufwerk)
+# Laufwerk 1 bekommt Position 0 & 1, Laufwerk 2 bekommt Position 2 & 3, usw.
 PBAR_POSITIONS = {}
 for idx, drive in enumerate(DRIVES):
     PBAR_POSITIONS[drive] = {
@@ -61,6 +60,7 @@ for idx, drive in enumerate(DRIVES):
     }
 
 def log(drive, message, color=RESET):
+    """Nutzt tqdm.write, damit Log-Texte die Fortschrittsbalken nicht zerschneiden."""
     clean_drive = drive.replace(":", "")
     tqdm.write(f"{color}[Laufwerk {clean_drive}:] {message}{RESET}")
 
@@ -151,17 +151,17 @@ def run_makemkv_with_byte_progress(drive_letter, cmd, temp_folder):
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="ignore")
     total_dvd_size = get_dvd_total_bytes(drive_letter)
     if total_dvd_size == 0: total_dvd_size = 8500000000
-    initial_total_mb = int(total_dvd_size / (1024 * 1024))
+    total_mb = int(total_dvd_size / (1024 * 1024))
     
     clean_drive = drive_letter.replace(":", "")
     pbar_pos = PBAR_POSITIONS[drive_letter]["makemkv"]
     
     pbar = tqdm(
-        total=initial_total_mb, 
+        total=total_mb, 
         desc=f"{CYAN}[Laufwerk {clean_drive}] MakeMKV liest aus{RESET}", 
         unit="MB", 
         bar_format="{desc}: |{bar}| {percentage:3.0f}% [{n_fmt}/{total_fmt} MB, {elapsed}<{remaining}]", 
-        leave=False, 
+        leave=False, # Verschwindet nach Abschluss, um Platz zu sparen
         position=pbar_pos
     )
 
@@ -173,16 +173,12 @@ def run_makemkv_with_byte_progress(drive_letter, cmd, temp_folder):
         time.sleep(1)
         current_bytes = get_folder_size(temp_folder)
         current_mb = int(current_bytes / (1024 * 1024))
-        
-        if current_mb >= pbar.total:
-            pbar.total = current_mb + 500
-        
         if current_mb > pbar.n:
-            pbar.n = current_mb
+            if current_mb >= total_mb: pbar.n = total_mb - 1
+            else: pbar.n = current_mb
             pbar.refresh()
                 
     process.wait()
-    pbar.total = int(get_folder_size(temp_folder) / (1024 * 1024))
     pbar.n = pbar.total
     pbar.refresh()
     pbar.close()
@@ -245,12 +241,9 @@ def handbrake_worker(drive_letter):
                     input_file = os.path.join(temp_folder, file)
                     output_file = os.path.join(final_folder, file)
                     
-                    # HIER GEÄNDERT: Übergabe des "-e" Parameters für den GPU Encoder
                     handbrake_cmd = [
                         HANDBRAKE_PATH, "--preset-import-gui",
-                        "-i", input_file, "-o", output_file, 
-                        "--preset", HANDBRAKE_PRESET,
-                        "-e", HANDBRAKE_ENCODER
+                        "-i", input_file, "-o", output_file, "--preset", HANDBRAKE_PRESET
                     ]
                     run_handbrake_with_progress(drive_letter, handbrake_cmd, f"{file}")
             
@@ -313,7 +306,7 @@ def drive_worker(drive_letter):
 def main():
     os.system('') # Aktiviert ANSI-Farben unter Windows
     print("==============================================")
-    print("   Asynchroner DVD-Ripper mit Config (v6.4)   ")
+    print("   Asynchroner DVD-Ripper mit Config (v6.2)   ")
     print("==============================================")
     
     register_makemkv()
@@ -321,9 +314,11 @@ def main():
     print("Einstellungen erfolgreich aus 'config.ini' geladen.\n")
     print("--- Konsolen-Live-Status ---")
     
+    # Reserviert Zeilen im Terminal, damit tqdm die festen Positionen nutzen kann
     for _ in range(len(DRIVES) * 2):
         print("")
 
+    # Threads starten
     for drive in DRIVES:
         threading.Thread(target=handbrake_worker, args=(drive,), daemon=True).start()
         threading.Thread(target=drive_worker, args=(drive,), daemon=True).start()
