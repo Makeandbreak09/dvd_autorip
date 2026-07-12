@@ -31,6 +31,8 @@ try:
     BETA_KEY = config.get("SETTINGS", "makemkv_beta_key")
     MIN_LENGTH = config.get("SETTINGS", "min_length")
     HANDBRAKE_PRESET = config.get("SETTINGS", "handbrake_preset")
+    
+    # HIER NEU: GPU Encoder aus Config laden (Standard: x264 falls nicht gesetzt)
     HANDBRAKE_ENCODER = config.get("SETTINGS", "handbrake_encoder", fallback="x264")
     
     DRIVES = [d.strip().upper() for d in config.get("SETTINGS", "drives").split(",")]
@@ -121,6 +123,22 @@ def get_dvd_name(drive_letter):
         return volume_name_buffer.value.strip()
     return None
 
+def get_dvd_total_bytes(drive_letter):
+    try: 
+        free_bytes = ctypes.c_ulonglong(0); total_bytes = ctypes.c_ulonglong(0); total_free_bytes = ctypes.c_ulonglong(0)
+        ctypes.windll.kernel32.GetDiskFreeSpaceExW(ctypes.c_wchar_p(f"{drive_letter}\\"), ctypes.byref(free_bytes), ctypes.byref(total_bytes), ctypes.byref(total_free_bytes))
+        return total_bytes.value
+    except: return 0
+
+def get_folder_size(folder_path):
+    total_size = 0
+    if not os.path.exists(folder_path): return 0
+    for dirpath, dirnames, filenames in os.walk(folder_path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if os.path.exists(fp): total_size += os.path.getsize(fp)
+    return total_size
+
 def eject_drive(drive_letter):
     try:
         clean_alias = drive_letter.replace(":", "")
@@ -130,53 +148,42 @@ def eject_drive(drive_letter):
     except Exception as e: log(drive_letter, f"Fehler beim Auswerfen: {e}", RED)
 
 def run_makemkv_with_byte_progress(drive_letter, cmd, temp_folder):
-    # HIER NEU: Füge das notwendige Argument für MakeMKV hinzu
-    if "--progress=-same" not in cmd:
-        cmd.append("--progress=-same")
-
-    process = subprocess.Popen(
-        cmd, 
-        stdout=subprocess.PIPE, 
-        stderr=subprocess.STDOUT, 
-        text=True, 
-        encoding="utf-8", 
-        errors="ignore",
-        bufsize=1
-    )
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="ignore")
+    total_dvd_size = get_dvd_total_bytes(drive_letter)
+    if total_dvd_size == 0: total_dvd_size = 8500000000
+    initial_total_mb = int(total_dvd_size / (1024 * 1024))
     
     clean_drive = drive_letter.replace(":", "")
     pbar_pos = PBAR_POSITIONS[drive_letter]["makemkv"]
     
-    # Der Balken arbeitet jetzt mit echten 100% statt Megabytes
     pbar = tqdm(
-        total=100, 
+        total=initial_total_mb, 
         desc=f"{CYAN}[Laufwerk {clean_drive}] MakeMKV liest aus{RESET}", 
-        bar_format="{desc}: |{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]", 
+        unit="MB", 
+        bar_format="{desc}: |{bar}| {percentage:3.0f}% [{n_fmt}/{total_fmt} MB, {elapsed}<{remaining}]", 
         leave=False, 
         position=pbar_pos
     )
 
-    # Regulärer Ausdruck für die PRGV-Werte (aktueller_wert, maximal_wert)
-    prgv_pattern = re.compile(r"PRGV:\d+,(\d+),(\d+)")
-    last_val = 0
+    def swallow_output():
+        for _ in iter(process.stdout.readline, ""): pass
+    threading.Thread(target=swallow_output, daemon=True).start()
 
-    # Haupt-Thread liest jetzt direkt live die Zeilen aus
-    for line in process.stdout:
-        match = prgv_pattern.search(line)
-        if match:
-            current_value = int(match.group(1))
-            max_value = int(match.group(2))
-            
-            if max_value > 0:
-                # Berechne den echten Prozentwert
-                pct = int((current_value / max_value) * 100)
-                if pct > last_val and pct <= 100:
-                    pbar.n = pct
-                    pbar.refresh()
-                    last_val = pct
+    while process.poll() is None:
+        time.sleep(1)
+        current_bytes = get_folder_size(temp_folder)
+        current_mb = int(current_bytes / (1024 * 1024))
+        
+        if current_mb >= pbar.total:
+            pbar.total = current_mb + 500
+        
+        if current_mb > pbar.n:
+            pbar.n = current_mb
+            pbar.refresh()
                 
     process.wait()
-    pbar.n = 100
+    pbar.total = int(get_folder_size(temp_folder) / (1024 * 1024))
+    pbar.n = pbar.total
     pbar.refresh()
     pbar.close()
     if process.returncode != 0: raise subprocess.CalledProcessError(process.returncode, cmd)
@@ -238,6 +245,7 @@ def handbrake_worker(drive_letter):
                     input_file = os.path.join(temp_folder, file)
                     output_file = os.path.join(final_folder, file)
                     
+                    # HIER GEÄNDERT: Übergabe des "-e" Parameters für den GPU Encoder
                     handbrake_cmd = [
                         HANDBRAKE_PATH, "--preset-import-gui",
                         "-i", input_file, "-o", output_file, 
@@ -305,7 +313,7 @@ def drive_worker(drive_letter):
 def main():
     os.system('') # Aktiviert ANSI-Farben unter Windows
     print("==============================================")
-    print("   Asynchroner DVD-Ripper mit Config (v6.5)   ")
+    print("   Asynchroner DVD-Ripper mit Config (v6.4)   ")
     print("==============================================")
     
     register_makemkv()
