@@ -294,10 +294,8 @@ def process_dvd(drive_letter, disc_name):
     temp_folder = os.path.join(TEMP_BASE, f"{folder_safe_drive}_{clean_name}_{timestamp}")
     final_folder = os.path.join(OUTPUT_BASE, clean_name)
 
-    # Robuste Ordnererstellung fuer Windows-Netzwerkpfade via CMD
-    for folder in [temp_folder, final_folder]:
-        if not os.path.exists(folder):
-            subprocess.run(f'cmd.exe /c mkdir "{folder}"', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+    os.makedirs(temp_folder, exist_ok=True)
+    os.makedirs(final_folder, exist_ok=True)
 
     try:
         makemkv_cmd = [MAKE_MKV_PATH, "mkv", f"disc:{mkv_index}", "all", temp_folder, f"--minlength={MIN_LENGTH}"]
