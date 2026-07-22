@@ -292,7 +292,7 @@ def process_dvd(drive_letter, disc_name):
     timestamp = time.strftime("%H%M%S")
     folder_safe_drive = drive_letter.replace(":", "")
     temp_folder = os.path.join(TEMP_BASE, f"{folder_safe_drive}_{clean_name}_{timestamp}")
-    final_folder = os.path.join(OUTPUT_BASE, clean_name)
+    final_folder = os.path.join(OUTPUT_BASE, f"{clean_name}_{timestamp}")
 
     os.makedirs(temp_folder, exist_ok=True)
     os.makedirs(final_folder, exist_ok=True)
